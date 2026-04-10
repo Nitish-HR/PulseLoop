@@ -25,6 +25,8 @@ export type Request = {
   contactName: string;
   contactNumber: string;
   status: RequestStatus;
+  lat?: number;
+  lng?: number;
   createdAt: string;
   updatedAt: string;
 };

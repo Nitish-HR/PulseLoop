@@ -17,6 +17,13 @@ export async function GET(request: NextRequest) {
 
     const dashboardData = await buildDonorDashboard(donorId);
 
+    if (!dashboardData) {
+      return NextResponse.json({
+        success: true,
+        needsOnboarding: true,
+      });
+    }
+
     return NextResponse.json({
       success: true,
       data: dashboardData,

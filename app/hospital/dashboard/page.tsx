@@ -2,8 +2,9 @@
 
 import AuthGuard from "@/components/auth-guard";
 import { useEffect, useState } from "react";
-import { collection, query, where, onSnapshot, addDoc } from "firebase/firestore";
-import { db } from "@/lib/firebase";
+import { collection, query, where, onSnapshot, addDoc, getDoc, doc, updateDoc, getDocs } from "firebase/firestore";
+import { auth, db } from "@/lib/firebase";
+import { onAuthStateChanged } from "firebase/auth";
 
 type RequestStatus = "PENDING" | "IN_PROGRESS" | "FULFILLED";
 type Urgency = "CRITICAL" | "URGENT" | "PLANNED";
@@ -33,11 +34,20 @@ type PriorityDonor = {
   tier: "HIGH" | "MEDIUM" | "LOW";
 };
 
-
-
 export default function HospitalDashboard() {
   const [activeTab, setActiveTab] = useState<"create" | "status">("status");
   
+  // Auth Identity State
+  const [authUid, setAuthUid] = useState<string | null>(null);
+  const [hospitalId, setHospitalId] = useState<string | null>(null);
+  
+  // Onboarding Interceptor State
+  const [needsOnboarding, setNeedsOnboarding] = useState(false);
+  const [hospitalsList, setHospitalsList] = useState<{id: string, name: string}[]>([]);
+  const [selectedHospital, setSelectedHospital] = useState("");
+  const [addressInput, setAddressInput] = useState("");
+  const [onboardLoading, setOnboardLoading] = useState(false);
+
   // Real-time Requests State
   const [requests, setRequests] = useState<RequestItem[]>([]);
   const [loadingRequests, setLoadingRequests] = useState(true);
@@ -62,6 +72,73 @@ export default function HospitalDashboard() {
   const [donorLists, setDonorLists] = useState<Record<string, PriorityDonor[]>>({});
   const [loadingDonors, setLoadingDonors] = useState<Record<string, boolean>>({});
   const [donorErrors, setDonorErrors] = useState<Record<string, string>>({});
+
+  // 1) Initialize Auth & Check DB Mapping
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      if (user) {
+        setAuthUid(user.uid);
+        try {
+          const userDoc = await getDoc(doc(db, "users", user.uid));
+          if (userDoc.exists()) {
+             const data = userDoc.data();
+             if (data.hospitalId) {
+                setHospitalId(data.hospitalId);
+             } else {
+                // Missing relationship identity -> trigger UI Interceptor
+                setNeedsOnboarding(true);
+                const hSnap = await getDocs(collection(db, "hospitals"));
+                const hList = hSnap.docs.map(d => ({ id: d.id, name: d.data().name || d.id }));
+                setHospitalsList(hList);
+                if (hList.length > 0) setSelectedHospital(hList[0].id);
+             }
+          }
+        } catch (error) {
+          console.error("Failed fetching user settings", error);
+        }
+      }
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // 2) Connect to specific dynamic hospital data endpoint
+  useEffect(() => {
+    if (!hospitalId) return;
+    
+    setLoadingRequests(true);
+    const q = query(collection(db, "requests"), where("hospitalId", "==", hospitalId));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const data: RequestItem[] = [];
+      snapshot.forEach((doc) => {
+        data.push({ id: doc.id, ...doc.data() } as RequestItem);
+      });
+      data.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      
+      setRequests(data);
+      setLoadingRequests(false);
+    });
+    return () => unsubscribe();
+  }, [hospitalId]);
+
+  const submitOnboarding = async (e: React.FormEvent) => {
+     e.preventDefault();
+     if (!authUid || !selectedHospital || !addressInput) return;
+     setOnboardLoading(true);
+     try {
+       await updateDoc(doc(db, "users", authUid), { hospitalId: selectedHospital });
+       await fetch("/api/hospital/update-address", {
+         method: "POST",
+         headers: { "Content-Type": "application/json" },
+         body: JSON.stringify({ hospitalId: selectedHospital, address: addressInput })
+       });
+       setHospitalId(selectedHospital);
+       setNeedsOnboarding(false);
+     } catch (err) {
+       console.error(err);
+     } finally {
+       setOnboardLoading(false);
+     }
+  };
 
   const handleToggleDonors = async (reqId: string) => {
     if (expandedRequestId === reqId) {
@@ -91,34 +168,31 @@ export default function HospitalDashboard() {
     }
   };
 
-  useEffect(() => {
-    // Real-time listener using onSnapshot exactly like requested
-    const q = query(collection(db, "requests"), where("hospitalId", "==", "hospital1"));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const data: RequestItem[] = [];
-      snapshot.forEach((doc) => {
-        data.push({ id: doc.id, ...doc.data() } as RequestItem);
-      });
-      // Sort client-side by date
-      data.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-      
-      setRequests(data);
-      setLoadingRequests(false);
-    });
-    return () => unsubscribe();
-  }, []);
-
   const handleCreateRequest = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!hospitalId) return;
+    
     setFormLoading(true);
     setFormError("");
     setFormSuccess(false);
 
     try {
       const now = new Date().toISOString();
+
+      // Fetch dynamic location maps associated natively
+      let lat = 0;
+      let lng = 0;
+      const hospitalDoc = await getDoc(doc(db, "hospitals", hospitalId));
+      if (hospitalDoc.exists() && hospitalDoc.data().lat !== undefined) {
+         lat = hospitalDoc.data().lat;
+         lng = hospitalDoc.data().lng;
+      }
+
       const newRequest = {
         ...formData,
-        hospitalId: "hospital1",
+        hospitalId: hospitalId, // Dynamic insertion explicitly mapping
+        lat,
+        lng,
         status: "PENDING",
         createdAt: now,
         updatedAt: now,
@@ -130,7 +204,6 @@ export default function HospitalDashboard() {
         bloodGroup: "A_POS", unitsRequired: 1, component: "WHOLE", urgency: "URGENT", hospitalName: "", city: "", contactName: "", contactNumber: ""
       });
       
-      // Flash success and jump directly to status view
       setTimeout(() => {
         setFormSuccess(false);
         setActiveTab("status");
@@ -146,10 +219,47 @@ export default function HospitalDashboard() {
 
   const formatBloodGroup = (bg: string) => bg.replace("_POS", "+").replace("_NEG", "-");
 
+  // --- INTERCEPTOR RENDER ---
+  if (needsOnboarding) {
+    return (
+      <AuthGuard allowedRole="HOSPITAL">
+         <div className="min-h-screen bg-gray-50 flex items-center justify-center p-6 animate-in fade-in duration-500">
+            <div className="bg-white max-w-md w-full rounded-2xl p-8 border border-gray-200 shadow-xl shadow-indigo-500/5 text-center">
+                <div className="w-16 h-16 bg-indigo-50 text-indigo-600 rounded-full flex items-center justify-center mb-6 mx-auto">
+                    <svg className="w-8 h-8" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" /></svg>
+                </div>
+                <h1 className="text-2xl font-bold text-gray-900 mb-2">Hospital Affiliation Setup</h1>
+                <p className="text-gray-500 text-sm mb-8">Please select which registered Hospital network mapping you originate from below to lock API pathways.</p>
+
+                <form onSubmit={submitOnboarding} className="space-y-4">
+                   <div className="text-left">
+                      <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Select Your Hospital</label>
+                      <select required value={selectedHospital} onChange={(e)=>setSelectedHospital(e.target.value)} className="w-full bg-gray-50 border border-gray-200 text-gray-900 rounded-xl px-4 py-3 outline-none focus:border-indigo-400 focus:ring-1 font-semibold">
+                         {hospitalsList.length === 0 ? <option value="">Loading registries...</option> : null}
+                         {hospitalsList.map(h => (
+                            <option key={h.id} value={h.id}>{h.name}</option>
+                         ))}
+                      </select>
+                   </div>
+                   <div className="text-left">
+                      <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2 mt-4">Precise Location Address</label>
+                      <input required type="text" value={addressInput} onChange={(e)=>setAddressInput(e.target.value)} placeholder="e.g. 1st Main Rd, Bangalore" className="w-full bg-gray-50 border border-gray-200 text-gray-900 rounded-xl px-4 py-3 outline-none focus:border-indigo-400 focus:ring-1 font-semibold"/>
+                   </div>
+                   <button type="submit" disabled={onboardLoading || hospitalsList.length === 0} className="w-full mt-4 bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-6 rounded-xl transition-colors disabled:opacity-50">
+                      {onboardLoading ? "Locking..." : "Connect Data Dashboard"}
+                   </button>
+                </form>
+            </div>
+         </div>
+      </AuthGuard>
+    )
+  }
+
+  // --- STANDARD RENDER ---
   return (
     <AuthGuard allowedRole="HOSPITAL">
       <div className="min-h-screen bg-gray-50 flex flex-col">
-        {/* Navigation / Header matching BloodBank Dashboard Styling */}
+        {/* Navigation / Header */}
         <header className="bg-white px-8 pt-4 sticky top-0 z-10 flex flex-col justify-between shadow-sm border-b border-gray-200">
           <div className="flex items-center justify-between pb-4">
             <div>
@@ -157,8 +267,8 @@ export default function HospitalDashboard() {
               <p className="text-sm text-gray-500 font-medium mt-1">Live Blood Request System</p>
             </div>
             <div className="flex items-center gap-4">
-               <div className="h-10 w-10 bg-indigo-100 text-indigo-600 rounded-full flex items-center justify-center font-bold border border-indigo-200">
-                 H1
+               <div className="h-10 px-4 bg-indigo-100 text-indigo-700 rounded-lg flex items-center justify-center font-bold border border-indigo-200 text-sm truncate max-w-xs shadow-sm">
+                 {hospitalsList.find(h => h.id === hospitalId)?.name || "Connected"}
                </div>
             </div>
           </div>
@@ -245,7 +355,7 @@ export default function HospitalDashboard() {
 
                   {/* Submit Row */}
                   <div className="md:col-span-2 pt-4 border-t border-gray-100 flex justify-end">
-                    <button type="submit" disabled={formLoading} className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-8 rounded-xl transition-colors shadow-sm disabled:opacity-50">
+                    <button type="submit" disabled={formLoading || !hospitalId} className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-8 rounded-xl transition-colors shadow-sm disabled:opacity-50">
                        {formLoading ? "Saving Request..." : "Broadcast Request"}
                     </button>
                   </div>
@@ -254,7 +364,7 @@ export default function HospitalDashboard() {
           </div>
         )}
 
-        {/* STATUS TAB (Matches Home tab UI exacts) */}
+        {/* STATUS TAB */}
         {activeTab === "status" && (
           <div className="flex-1 max-w-7xl w-full mx-auto p-6 md:p-8 animate-in fade-in duration-300">
             {loadingRequests ? (
@@ -270,7 +380,6 @@ export default function HospitalDashboard() {
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 w-full">
                 {requests.map((req) => (
                   <div key={req.id} className="bg-white border border-gray-200 hover:border-indigo-200 rounded-2xl p-5 shadow-sm transition-colors flex flex-col">
-                     {/* Exact stylistic mapping from Blood Bank dashboard item cards */}
                      <div className="flex justify-between items-start mb-3">
                        <span className="inline-flex items-center justify-center px-2.5 py-1 rounded bg-red-100 text-red-700 font-bold text-sm">
                          {formatBloodGroup(req.bloodGroup)}
@@ -297,7 +406,6 @@ export default function HospitalDashboard() {
                        </span>
                      </div>
 
-                     {/* Expander specifically requested via user instructions */}
                      {req.status === "IN_PROGRESS" && (
                        <div className="mt-4">
                          <button 

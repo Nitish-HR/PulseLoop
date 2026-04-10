@@ -29,6 +29,9 @@ export type Donor = {
   phoneNumber: string;
   bloodGroup: BloodGroup;
   city: string;
+  address?: string;
+  lat?: number;
+  lng?: number;
   lastDonationDate: string | null;
   donationCount: number;
   streakCount: number;

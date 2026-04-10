@@ -42,7 +42,12 @@ export async function generatePriorityDonorList(
           ? DEFAULT_DAYS_SINCE_LAST_DONATION
           : calculateDaysSince(donor.lastDonationDate);
 
-      const distance = calculateDistance(donor.city, city);
+      const distance = calculateDistance(
+        donor.lat || 0,
+        donor.lng || 0,
+        request.lat || 0,
+        request.lng || 0
+      );
 
       const readiness = await getReadinessScore({
         donorId: donor.id,

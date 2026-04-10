@@ -2,6 +2,29 @@
 
 import AuthGuard from "@/components/auth-guard";
 import { useEffect, useState } from "react";
+import { onAuthStateChanged } from "firebase/auth";
+import { auth } from "@/lib/firebase";
+
+type DonorDashboardData = {
+  eligibilityStatus: "ELIGIBLE" | "NOT_ELIGIBLE";
+  nextEligibleDate: string;
+  donationCount: number;
+  streakCount: number;
+  lastDonationDate: string | null;
+  churnStatus: "ACTIVE" | "AT_RISK";
+  livesImpacted: number;
+  activeRequestCount: number;
+  address: string;
+};
+
+type BloodRequest = {
+  id: string;
+  bloodGroup: string;
+  hospitalName: string;
+  unitsRequired: number;
+  urgency: "CRITICAL" | "URGENT" | "PLANNED";
+  city: string;
+};
 
 type Drive = {
   id: string;
@@ -17,17 +40,93 @@ type Drive = {
 };
 
 export default function DonorDashboard() {
-  const [activeTab, setActiveTab] = useState<"overview" | "drives">("overview");
+  const [activeTab, setActiveTab] = useState<"dashboard" | "emergency" | "drives">("dashboard");
 
-  // Drives State
+  // Auth State
+  const [authUid, setAuthUid] = useState<string | null>(null);
+  const [authProfile, setAuthProfile] = useState<{name: string, email: string}>({name: "", email: ""});
+  
+  // Onboarding State
+  const [needsOnboarding, setNeedsOnboarding] = useState(false);
+  const [onboardLoading, setOnboardLoading] = useState(false);
+  const [onboardError, setOnboardError] = useState("");
+  const [onboardForm, setOnboardForm] = useState({
+    city: "",
+    phoneNumber: "",
+    bloodGroup: "A_POS",
+    address: ""
+  });
+
+  // Profile Modal Settings
+  const [showProfileModal, setShowProfileModal] = useState(false);
+  const [profileAddress, setProfileAddress] = useState("");
+  const [profileLoading, setProfileLoading] = useState(false);
+
+  // State: Dashboard
+  const [dashboardData, setDashboardData] = useState<DonorDashboardData | null>(null);
+  const [loadingDashboard, setLoadingDashboard] = useState(true);
+
+  // State: Emergency
+  const [requests, setRequests] = useState<BloodRequest[]>([]);
+  const [loadingRequests, setLoadingRequests] = useState(true);
+  const [isResponding, setIsResponding] = useState<Record<string, boolean>>({});
+  const [successResponse, setSuccessResponse] = useState<string | null>(null);
+
+  // State: Drives
   const [drivesList, setDrivesList] = useState<Drive[]>([]);
-  const [loadingDrives, setLoadingDrives] = useState(false);
+  const [loadingDrives, setLoadingDrives] = useState(true);
 
-  // Fetch Global Drives Network
+  // --- Auth Initializer ---
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      if (user) {
+        setAuthUid(user.uid);
+        setAuthProfile({
+          name: user.displayName || "Generous Donor",
+          email: user.email || ""
+        });
+      }
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // --- Fetch Methods ---
+  const fetchDashboard = async () => {
+    if (!authUid) return;
+    setLoadingDashboard(true);
+    setNeedsOnboarding(false);
+    try {
+      const res = await fetch(`/api/donor/dashboard?donorId=${authUid}`);
+      const json = await res.json();
+      
+      if (json.needsOnboarding) {
+         setNeedsOnboarding(true);
+      } else if (json.success) {
+         setDashboardData(json.data);
+      }
+    } catch (error) {
+      console.error("Failed to fetch dashboard", error);
+    } finally {
+      setLoadingDashboard(false);
+    }
+  };
+
+  const fetchRequests = async () => {
+    setLoadingRequests(true);
+    try {
+      const res = await fetch("/api/requests/active?city=Bangalore");
+      const json = await res.json();
+      if (json.success) setRequests(json.data);
+    } catch (error) {
+      console.error("Failed to fetch requests", error);
+    } finally {
+      setLoadingRequests(false);
+    }
+  };
+
   const fetchDrives = async () => {
     setLoadingDrives(true);
     try {
-      // Intentionally omitting bloodBankId query parameter to fetch ALL drives network-wide
       const res = await fetch("/api/drives/all");
       const json = await res.json();
       if (json.success) setDrivesList(json.data);
@@ -39,16 +138,187 @@ export default function DonorDashboard() {
   };
 
   useEffect(() => {
-    if (activeTab === "drives") {
+    if (!authUid) return;
+    if (activeTab === "dashboard") {
+      fetchDashboard();
+    } else if (activeTab === "emergency") {
+      fetchRequests();
+    } else if (activeTab === "drives") {
       fetchDrives();
     }
-  }, [activeTab]);
+  }, [activeTab, authUid]);
 
+  // --- Actions ---
+  const submitOnboarding = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!authUid) return;
+    setOnboardLoading(true);
+    setOnboardError("");
+    
+    try {
+      const res = await fetch("/api/donor/onboard", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ 
+          donorId: authUid, 
+          name: authProfile.name,
+          email: authProfile.email,
+          ...onboardForm 
+        }),
+      });
+      const json = await res.json();
+      
+      if (json.success) {
+        fetchDashboard();
+      } else {
+        setOnboardError(json.error || "Failed to create profile mapping.");
+      }
+    } catch (error) {
+      setOnboardError("Network issues disrupted saving.");
+    } finally {
+      setOnboardLoading(false);
+    }
+  };
+
+  const handleRespond = async (requestId: string) => {
+    if (!authUid) return;
+    setIsResponding(prev => ({ ...prev, [requestId]: true }));
+    setSuccessResponse(null);
+    try {
+      const res = await fetch("/api/donor/respond", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ donorId: authUid, requestId }),
+      });
+      const json = await res.json();
+      if (json.success) {
+        setSuccessResponse(requestId);
+      }
+    } catch (error) {
+      console.error("Failed to respond to request", error);
+    } finally {
+      setIsResponding(prev => ({ ...prev, [requestId]: false }));
+    }
+  };
+
+  const handleUpdateProfile = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!authUid) return;
+    setProfileLoading(true);
+    try {
+       const res = await fetch("/api/donor/update-address", {
+         method: "POST",
+         headers: { "Content-Type": "application/json" },
+         body: JSON.stringify({ donorId: authUid, address: profileAddress }),
+       });
+       const json = await res.json();
+       if (json.success) {
+          setShowProfileModal(false);
+          fetchDashboard(); 
+       }
+    } catch (err) {
+       console.error(err);
+    } finally {
+       setProfileLoading(false);
+    }
+  };
+
+  const openProfileSettings = () => {
+    setProfileAddress(dashboardData?.address || "");
+    setShowProfileModal(true);
+  };
+
+  const calculateDaysUntil = (dateStr: string) => {
+    const nextDate = new Date(dateStr);
+    const today = new Date();
+    const diffTime = nextDate.getTime() - today.getTime();
+    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+    return diffDays > 0 ? diffDays : 0;
+  };
+
+  const formatDonationDate = (isoStr: string) => {
+    const d = new Date(isoStr);
+    return d.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+  };
+
+  // --- INTERCEPTOR Render ---
+  if (needsOnboarding) {
+    return (
+      <AuthGuard allowedRole="DONOR">
+         <div className="min-h-screen bg-gray-50 flex items-center justify-center p-6 animate-in fade-in duration-500">
+            <div className="bg-white max-w-md w-full rounded-2xl p-8 border border-gray-200 shadow-xl shadow-red-500/5">
+                <div className="w-16 h-16 bg-red-50 text-red-600 rounded-full flex items-center justify-center mb-6 mx-auto">
+                    <svg className="w-8 h-8" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /><path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4l3 3" /></svg>
+                </div>
+                <h1 className="text-2xl font-bold text-center text-gray-900 mb-2">Complete Your Profile</h1>
+                <p className="text-gray-500 text-center text-sm mb-8">We need just a few details to map you to emergencies locally.</p>
+
+                {onboardError && ( <div className="mb-6 p-4 bg-red-50 text-red-600 rounded-lg text-sm font-bold border border-red-100">{onboardError}</div> )}
+                
+                <form onSubmit={submitOnboarding} className="space-y-4">
+                   <div className="grid grid-cols-2 gap-4">
+                     <div>
+                        <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">City</label>
+                        <input required type="text" value={onboardForm.city} onChange={(e)=>setOnboardForm({...onboardForm, city: e.target.value})} placeholder="e.g. Bangalore" className="w-full bg-gray-50 border border-gray-200 text-gray-900 rounded-xl px-4 py-3 outline-none focus:border-red-400 focus:ring-1 transition-colors"/>
+                     </div>
+                     <div>
+                        <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Blood Group</label>
+                        <select required value={onboardForm.bloodGroup} onChange={(e)=>setOnboardForm({...onboardForm, bloodGroup: e.target.value})} className="w-full bg-gray-50 border border-gray-200 text-gray-900 rounded-xl px-4 py-3 outline-none focus:border-red-400 focus:ring-1 font-semibold">
+                           <option value="A_POS">A+</option><option value="A_NEG">A-</option><option value="B_POS">B+</option><option value="B_NEG">B-</option>
+                           <option value="O_POS">O+</option><option value="O_NEG">O-</option><option value="AB_POS">AB+</option><option value="AB_NEG">AB-</option>
+                        </select>
+                     </div>
+                   </div>
+                   
+                   <div>
+                      <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Phone Number</label>
+                      <input required type="tel" value={onboardForm.phoneNumber} onChange={(e)=>setOnboardForm({...onboardForm, phoneNumber: e.target.value})} placeholder="+91..." className="w-full bg-gray-50 border border-gray-200 text-gray-900 rounded-xl px-4 py-3 outline-none focus:border-red-400 focus:ring-1 transition-colors"/>
+                   </div>
+                   
+                   <div>
+                      <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Complete Address</label>
+                      <textarea required value={onboardForm.address} onChange={(e)=>setOnboardForm({...onboardForm, address: e.target.value})} placeholder="Full street address for GPS mapping routing..." className="w-full bg-gray-50 border border-gray-200 text-gray-900 rounded-xl px-4 py-3 outline-none focus:border-red-400 focus:ring-1 transition-colors resize-none h-24" />
+                   </div>
+
+                   <button type="submit" disabled={onboardLoading} className="w-full pt-2 mt-4 bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-6 rounded-xl transition-colors disabled:opacity-50">
+                      {onboardLoading ? "Mapping Database..." : "Unlock Dashboard"}
+                   </button>
+                </form>
+            </div>
+         </div>
+      </AuthGuard>
+    )
+  }
+
+  // --- STANDARD RENDER ---
   return (
     <AuthGuard allowedRole="DONOR">
-      <div className="min-h-screen bg-gray-50 flex flex-col">
-        
-        {/* Navigation / Header */}
+      <div className="min-h-screen bg-gray-50 flex flex-col relative w-full h-full">
+        {/* Profile Details Modal Overlay */}
+        {showProfileModal && (
+          <div className="fixed inset-0 bg-gray-900/40 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-in fade-in duration-200">
+             <div className="bg-white rounded-2xl p-8 max-w-md w-full shadow-2xl animate-in zoom-in-95 duration-200">
+                <div className="flex justify-between items-center mb-6">
+                  <h3 className="text-xl font-bold text-gray-900">Profile Settings</h3>
+                  <button onClick={() => setShowProfileModal(false)} className="text-gray-400 hover:text-gray-600 transition-colors">
+                     <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                  </button>
+                </div>
+
+                <form onSubmit={handleUpdateProfile} className="space-y-4">
+                  <div>
+                      <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Complete Address</label>
+                      <textarea required value={profileAddress} onChange={(e)=>setProfileAddress(e.target.value)} placeholder="Full street address for GPS mapping routing..." className="w-full bg-gray-50 border border-gray-200 text-gray-900 rounded-xl px-4 py-3 outline-none focus:border-red-400 focus:ring-1 transition-colors resize-none h-24" />
+                  </div>
+                  <button type="submit" disabled={profileLoading} className="w-full bg-gray-900 hover:bg-black text-white font-bold py-3 rounded-xl transition-colors disabled:opacity-50">
+                     {profileLoading ? "Synchronizing..." : "Update Location Profile"}
+                  </button>
+                </form>
+             </div>
+          </div>
+        )}
+
+        {/* Header */}
         <header className="bg-white px-8 pt-4 sticky top-0 z-10 flex flex-col justify-between shadow-sm border-b border-gray-200">
           <div className="flex items-center justify-between pb-4">
             <div>
@@ -56,45 +326,171 @@ export default function DonorDashboard() {
               <p className="text-sm text-gray-500 font-medium mt-1">Manage Appointments & Find Donation Events</p>
             </div>
             <div className="flex items-center gap-4">
+               <button onClick={openProfileSettings} className="h-10 w-10 bg-gray-50 hover:bg-gray-100 text-gray-500 rounded-full flex items-center justify-center font-bold border border-gray-200 shrink-0 transition-colors" title="Settings">
+                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
+               </button>
                <div className="h-10 w-10 bg-red-100 text-red-600 rounded-full flex items-center justify-center font-bold border border-red-200 shrink-0">
-                 D
+                 {authProfile.name.charAt(0).toUpperCase() || "D"}
                </div>
             </div>
           </div>
           
           <div className="flex gap-8 overflow-x-auto">
             <button 
-              className={`py-3 font-semibold text-sm border-b-2 transition-colors whitespace-nowrap ${activeTab === "overview" ? "border-red-600 text-red-600" : "border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300"}`}
-              onClick={() => setActiveTab("overview")}
+              className={`py-3 font-semibold text-sm border-b-2 transition-colors whitespace-nowrap ${activeTab === "dashboard" ? "border-red-600 text-red-600" : "border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300"}`}
+              onClick={() => setActiveTab("dashboard")}
             >
-              Overview
+              Dashboard
+            </button>
+            <button 
+              className={`py-3 font-semibold text-sm border-b-2 transition-colors whitespace-nowrap flex items-center gap-2 ${activeTab === "emergency" ? "border-red-600 text-red-600" : "border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300"}`}
+              onClick={() => setActiveTab("emergency")}
+            >
+              Emergency
             </button>
             <button 
               className={`py-3 font-semibold text-sm border-b-2 transition-colors whitespace-nowrap ${activeTab === "drives" ? "border-red-600 text-red-600" : "border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300"}`}
               onClick={() => setActiveTab("drives")}
             >
-              Discover Drives
+              Drives
             </button>
           </div>
         </header>
 
-        {/* OVERVIEW TAB */}
-        {activeTab === "overview" && (
-          <div className="flex-1 max-w-4xl mx-auto w-full p-8 animate-in fade-in duration-300">
-            <div className="bg-white rounded-2xl shadow-sm p-12 border border-gray-100 text-center flex flex-col items-center justify-center h-full min-h-[400px]">
-              <div className="w-16 h-16 bg-red-50 text-red-500 rounded-full flex items-center justify-center mb-4">
-                 <svg className="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
-              </div>
-              <h2 className="text-2xl font-bold text-gray-800 mb-2">Welcome Back!</h2>
-              <p className="text-gray-500 max-w-md">Your personalized donation statistics and scheduling tools will appear here. Navigate to the Drives tab to find events near you.</p>
-            </div>
+        {/* TAB 1: DASHBOARD */}
+        {activeTab === "dashboard" && (
+          <div className="flex-1 max-w-5xl mx-auto w-full p-6 md:p-8 animate-in fade-in duration-300">
+            {loadingDashboard || !dashboardData ? (
+               <div className="py-20 flex flex-col items-center justify-center text-gray-400">
+                 <div className="w-8 h-8 border-4 border-gray-200 border-t-red-500 rounded-full animate-spin mb-4" />
+                 <p className="font-medium animate-pulse">Loading dashboard...</p>
+               </div>
+            ) : (
+               <div className="space-y-6 lg:space-y-8">
+                 {/* Churn Alert Row */}
+                 {dashboardData.churnStatus === "AT_RISK" && (
+                   <div className="bg-orange-50 border border-orange-200 rounded-2xl p-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-sm">
+                      <div>
+                         <div className="flex items-center gap-2 text-orange-800 font-bold">
+                           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>
+                           We Miss You!
+                         </div>
+                         <p className="text-orange-700/80 text-sm mt-1">You haven’t donated in a while. Someone might need your help right now.</p>
+                      </div>
+                      <button onClick={() => setActiveTab("emergency")} className="shrink-0 bg-orange-600 hover:bg-orange-700 text-white font-medium py-2.5 px-6 rounded-lg transition-colors shadow-sm">
+                         I'm ready to donate
+                      </button>
+                   </div>
+                 )}
+
+                 <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                   {/* Missing Journey Map OR History Block */}
+                   <div className={`col-span-1 md:col-span-3 rounded-2xl p-8 border shadow-sm flex flex-col md:flex-row items-center justify-between text-center md:text-left ${dashboardData.lastDonationDate === null ? "bg-red-50 border-red-200" : "bg-white border-gray-200"}`}>
+                      {dashboardData.lastDonationDate === null ? (
+                         <>
+                            <div>
+                               <h2 className="text-2xl font-bold text-gray-900 mb-1">Start your donation journey!</h2>
+                               <p className="text-gray-500 font-medium max-w-lg mb-4 md:mb-0">You're fully verified and ready but haven't donated yet. Check the emergency networks closely mapped to your region.</p>
+                            </div>
+                            <button onClick={() => setActiveTab("emergency")} className="bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-8 rounded-xl shadow-md transition-colors shrink-0">
+                               View Emergencies
+                            </button>
+                         </>
+                      ) : (
+                         <>
+                            <div>
+                               <p className="text-xs uppercase font-bold text-gray-500 tracking-wider mb-1">Historical Status</p>
+                               <h2 className={`text-2xl font-black ${dashboardData.eligibilityStatus === "ELIGIBLE" ? "text-green-600" : "text-gray-900"}`}>
+                                 {dashboardData.eligibilityStatus === "ELIGIBLE" ? "Eligible to donate" : `Eligible in ${calculateDaysUntil(dashboardData.nextEligibleDate)} days`}
+                               </h2>
+                            </div>
+                            <div className="mt-4 md:mt-0 text-center">
+                               <p className="text-xs font-bold text-gray-500 uppercase tracking-widest mb-1 shadow-gray-200">Last Visited</p>
+                               <div className="bg-gray-100/50 text-gray-800 font-bold tracking-tight px-4 py-2 rounded-lg border border-gray-200">{formatDonationDate(dashboardData.lastDonationDate)}</div>
+                            </div>
+                         </>
+                      )}
+                   </div>
+
+                   {/* Stats Grid */}
+                   <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-200 flex flex-col justify-center">
+                     <p className="text-xs uppercase font-bold text-gray-500 tracking-wider mb-2">Total Donations</p>
+                     <p className="text-4xl font-black text-gray-900">{dashboardData.donationCount}</p>
+                   </div>
+                   <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-200 flex flex-col justify-center">
+                     <p className="text-xs uppercase font-bold text-gray-500 tracking-wider mb-2">Current Streak</p>
+                     <p className={`text-4xl font-black ${dashboardData.streakCount > 0 ? "text-red-600" : "text-gray-400"}`}>{dashboardData.streakCount} 🔥</p>
+                   </div>
+                   <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-200 flex flex-col justify-center bg-gradient-to-br from-blue-50 to-white">
+                     <p className="text-xs uppercase font-bold text-gray-500 tracking-wider mb-2">Lives Impacted</p>
+                     <p className="text-4xl font-black text-blue-600">{dashboardData.livesImpacted}</p>
+                   </div>
+                 </div>
+               </div>
+            )}
           </div>
         )}
 
-        {/* DRIVES TAB VIEW */}
+        {/* TAB 2: EMERGENCY */}
+        {activeTab === "emergency" && (
+          <div className="flex-1 max-w-5xl mx-auto w-full p-6 md:p-8 animate-in fade-in duration-300">
+            <div className="mb-6">
+              <h2 className="text-xl font-bold text-gray-900">Active Requests in Your Region</h2>
+              <p className="text-sm text-gray-500 mt-1">Hospitals nearby are urgently looking for donors matching your requirements.</p>
+            </div>
+
+            {loadingRequests ? (
+               <div className="py-20 flex flex-col items-center justify-center text-gray-400">
+                 <div className="w-8 h-8 border-4 border-gray-200 border-t-red-500 rounded-full animate-spin mb-4" />
+                 <p className="font-medium animate-pulse">Scanning live emergency networks...</p>
+               </div>
+            ) : requests.length === 0 ? (
+               <div className="bg-white border border-gray-200 rounded-2xl p-16 text-center shadow-sm">
+                  <h3 className="text-lg font-bold text-gray-900 mb-2">No Active Requests</h3>
+                  <p className="text-gray-500 font-medium">There are currently no active emergencies requiring your response.</p>
+               </div>
+            ) : (
+               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                 {requests.map((req) => (
+                   <div key={req.id} className={`bg-white border hover:shadow-md rounded-2xl p-6 shadow-sm transition-all flex flex-col ${successResponse === req.id ? 'border-green-300 bg-green-50/30' : 'border-gray-200'}`}>
+                      <div className="flex justify-between items-start mb-4">
+                        <div>
+                           <span className="inline-flex items-center justify-center px-2.5 py-1 rounded bg-red-100 text-red-700 font-bold text-sm mb-2">{req.bloodGroup.replace("_POS", "+").replace("_NEG", "-")}</span>
+                           <h3 className="text-lg font-bold text-gray-900">{req.hospitalName}</h3>
+                           <p className="text-sm text-gray-500">{req.city}</p>
+                        </div>
+                        <span className={`text-xs font-semibold px-2.5 py-1 rounded-md ${req.urgency === "CRITICAL" ? "bg-red-600 text-white" : req.urgency === "URGENT" ? "bg-yellow-100 text-yellow-800" : "bg-blue-50 text-blue-600"}`}>
+                           {req.urgency}
+                        </span>
+                      </div>
+                      
+                      <div className="mt-auto pt-4 flex items-center justify-between border-t border-gray-100">
+                         {successResponse === req.id ? (
+                            <div className="flex items-center gap-2 text-green-700 font-bold w-full justify-center bg-green-100 py-3 rounded-xl border border-green-200">
+                              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7"></path></svg>
+                              You Volunteered!
+                            </div>
+                         ) : (
+                            <button 
+                              onClick={() => handleRespond(req.id)}
+                              disabled={isResponding[req.id]}
+                              className="w-full bg-gray-900 hover:bg-black text-white font-bold py-3 rounded-xl transition-colors disabled:opacity-50"
+                            >
+                               {isResponding[req.id] ? "Connecting..." : "I'll Donate"}
+                            </button>
+                         )}
+                      </div>
+                   </div>
+                 ))}
+               </div>
+            )}
+          </div>
+        )}
+
+        {/* TAB 3: DRIVES */}
         {activeTab === "drives" && (
           <div className="flex-1 max-w-7xl w-full mx-auto p-6 md:p-8 animate-in fade-in duration-300">
-            <div className="mb-8">
+            <div className="mb-6">
                <h2 className="text-xl font-bold text-gray-900">Upcoming Donation Events</h2>
                <p className="text-sm text-gray-500 mt-1">Discover regional events hosted by partner Blood Banks and join the cause.</p>
             </div>
@@ -106,9 +502,6 @@ export default function DonorDashboard() {
                </div>
             ) : drivesList.length === 0 ? (
                <div className="bg-white border border-gray-200 rounded-2xl p-16 text-center shadow-sm">
-                  <div className="w-16 h-16 bg-gray-50 rounded-full flex items-center justify-center mx-auto mb-4">
-                     <svg className="w-8 h-8 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
-                  </div>
                   <h3 className="text-lg font-bold text-gray-900 mb-2">No Upcoming Events</h3>
                   <p className="text-gray-500 font-medium">There are currently no donation drives scheduled in the network. Check back soon.</p>
                </div>

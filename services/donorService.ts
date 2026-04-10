@@ -13,23 +13,26 @@ type DonorDashboard = {
   nextEligibleDate: string;
   donationCount: number;
   streakCount: number;
+  lastDonationDate: string | null;
   churnStatus: "ACTIVE" | "AT_RISK";
   livesImpacted: number;
   activeRequestCount: number;
+  address: string;
 };
 
 const DONATION_COOLDOWN_DAYS = 90;
 
-export async function buildDonorDashboard(donorId: string): Promise<DonorDashboard> {
+export async function buildDonorDashboard(donorId: string): Promise<DonorDashboard | null> {
   const donor = await getDonorById(donorId);
 
   if (!donor) {
-    throw new Error("Donor not found");
+    return null;
   }
 
   const donationCount = donor.donationCount;
   const streakCount = donor.streakCount;
   const lastDonationDate = donor.lastDonationDate;
+  const address = donor.address || "";
 
   const daysSinceLastDonation =
     lastDonationDate === null ? DONATION_COOLDOWN_DAYS : calculateDaysSince(lastDonationDate);
@@ -55,8 +58,10 @@ export async function buildDonorDashboard(donorId: string): Promise<DonorDashboa
     nextEligibleDate,
     donationCount,
     streakCount,
+    lastDonationDate,
     churnStatus,
     livesImpacted,
     activeRequestCount: 0,
+    address,
   };
 }

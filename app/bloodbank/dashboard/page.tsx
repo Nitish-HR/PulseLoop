@@ -2,7 +2,9 @@
 
 import AuthGuard from "@/components/auth-guard";
 import { useEffect, useState } from "react";
-import { auth } from "@/lib/firebase";
+import { onAuthStateChanged } from "firebase/auth";
+import { doc, getDoc, updateDoc, collection, getDocs } from "firebase/firestore";
+import { auth, db } from "@/lib/firebase";
 
 type Request = {
   id: string;
@@ -45,6 +47,17 @@ type InventoryItem = { bloodGroup: string; unitsAvailable: number };
 export default function BloodBankDashboard() {
   const [activeTab, setActiveTab] = useState<"home" | "requests" | "inventory" | "drives">("home");
 
+  // Auth Identity State
+  const [authUid, setAuthUid] = useState<string | null>(null);
+  const [bloodBankId, setBloodBankId] = useState<string | null>(null);
+
+  // Onboarding Interceptor State
+  const [needsOnboarding, setNeedsOnboarding] = useState(false);
+  const [bloodBanksList, setBloodBanksList] = useState<{id: string, name: string}[]>([]);
+  const [selectedBloodBank, setSelectedBloodBank] = useState("");
+  const [addressInput, setAddressInput] = useState("");
+  const [onboardLoading, setOnboardLoading] = useState(false);
+
   // Requests State
   const [requests, setRequests] = useState<Request[]>([]);
   const [selectedRequest, setSelectedRequest] = useState<Request | null>(null);
@@ -72,7 +85,54 @@ export default function BloodBankDashboard() {
     title: "", purpose: "", date: "", time: "", location: "", contactName: "", contactNumber: "", targetAudience: ""
   });
 
-  // For scope of demo, mapping to Bangalore as per your existing test-DB payloads
+  // 1) Initialize Auth & Check DB Mapping
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      if (user) {
+        setAuthUid(user.uid);
+        try {
+          const userDoc = await getDoc(doc(db, "users", user.uid));
+          if (userDoc.exists()) {
+             const data = userDoc.data();
+             if (data.bloodBankId) {
+                setBloodBankId(data.bloodBankId);
+             } else {
+                setNeedsOnboarding(true);
+                const bbSnap = await getDocs(collection(db, "bloodBanks"));
+                const bbList = bbSnap.docs.map(d => ({ id: d.id, name: d.data().name || d.id }));
+                setBloodBanksList(bbList);
+                if (bbList.length > 0) setSelectedBloodBank(bbList[0].id);
+             }
+          }
+        } catch (error) {
+          console.error("Failed fetching user settings", error);
+        }
+      }
+    });
+    return () => unsubscribe();
+  }, []);
+
+  const submitOnboarding = async (e: React.FormEvent) => {
+     e.preventDefault();
+     if (!authUid || !selectedBloodBank || !addressInput) return;
+     setOnboardLoading(true);
+     try {
+       await updateDoc(doc(db, "users", authUid), { bloodBankId: selectedBloodBank });
+       await fetch("/api/bloodbank/update-address", {
+         method: "POST",
+         headers: { "Content-Type": "application/json" },
+         body: JSON.stringify({ bloodBankId: selectedBloodBank, address: addressInput })
+       });
+       setBloodBankId(selectedBloodBank);
+       setNeedsOnboarding(false);
+     } catch (err) {
+       console.error(err);
+     } finally {
+       setOnboardLoading(false);
+     }
+  };
+
+
   const fetchRequests = async () => {
     setLoadingRequests(true);
     try {
@@ -87,9 +147,9 @@ export default function BloodBankDashboard() {
   };
 
   const fetchInventoryItems = async () => {
+    if (!bloodBankId) return;
     setLoadingInventory(true);
     try {
-      const bloodBankId = "bloodbank1"; 
       const res = await fetch(`/api/bloodbank/inventory?bloodBankId=${bloodBankId}`);
       const json = await res.json();
       if (json.inventory) setInventoryList(json.inventory);
@@ -101,10 +161,9 @@ export default function BloodBankDashboard() {
   };
 
   const fetchDrives = async () => {
+    if (!bloodBankId) return;
     setLoadingDrives(true);
     try {
-      // Isolate exactly only what belongs to this bloodbank portal
-      const bloodBankId = "bloodbank1";
       const res = await fetch(`/api/drives/all?bloodBankId=${bloodBankId}`);
       const json = await res.json();
       if (json.success) setDrivesList(json.data);
@@ -116,6 +175,8 @@ export default function BloodBankDashboard() {
   };
 
   useEffect(() => {
+    if (!bloodBankId) return;
+    
     if (activeTab === "requests") {
       fetchRequests();
     } else if (activeTab === "inventory") {
@@ -126,7 +187,7 @@ export default function BloodBankDashboard() {
       fetchRequests();
       fetchInventoryItems();
     }
-  }, [activeTab]);
+  }, [activeTab, bloodBankId]);
 
   /* ================= ACTION HANDLERS ================= */
 
@@ -142,10 +203,9 @@ export default function BloodBankDashboard() {
   };
 
   const handleCheckInventory = async () => {
-    if (!selectedRequest) return;
+    if (!selectedRequest || !bloodBankId) return;
     setActionLoading(true);
     try {
-      const bloodBankId = "bloodbank1";
       const res = await fetch("/api/bloodbank/check-inventory", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -211,6 +271,7 @@ export default function BloodBankDashboard() {
   };
 
   const handleModifyInventory = async (action: "add-stock" | "withdraw-stock") => {
+    if (!bloodBankId) return;
     if (manageUnits < 1) {
       setInventoryError("Units must be at least 1.");
       return;
@@ -218,7 +279,6 @@ export default function BloodBankDashboard() {
     setInventoryActionLoading(true);
     setInventoryError("");
     try {
-      const bloodBankId = "bloodbank1";
       const res = await fetch(`/api/bloodbank/${action}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -239,9 +299,9 @@ export default function BloodBankDashboard() {
 
   const handleCreateDrive = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!bloodBankId) return;
     setDriveActionLoading(true);
     try {
-      const bloodBankId = "bloodbank1";
       const res = await fetch("/api/bloodbank/create-drive", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -252,7 +312,7 @@ export default function BloodBankDashboard() {
         setDriveForm({
           title: "", purpose: "", date: "", time: "", location: "", contactName: "", contactNumber: "", targetAudience: ""
         });
-        fetchDrives(); // Instantly visually refresh the array
+        fetchDrives();
       } else {
         console.error("Failed", json.error);
       }
@@ -265,6 +325,43 @@ export default function BloodBankDashboard() {
 
   const formatBloodGroup = (bg: string) => bg.replace("_POS", "+").replace("_NEG", "-");
 
+  // --- INTERCEPTOR RENDER ---
+  if (needsOnboarding) {
+    return (
+      <AuthGuard allowedRole="BLOOD_BANK">
+         <div className="min-h-screen bg-gray-50 flex items-center justify-center p-6 animate-in fade-in duration-500">
+            <div className="bg-white max-w-md w-full rounded-2xl p-8 border border-gray-200 shadow-xl shadow-red-500/5 text-center">
+                <div className="w-16 h-16 bg-red-50 text-red-600 rounded-full flex items-center justify-center mb-6 mx-auto">
+                    <svg className="w-8 h-8" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" /></svg>
+                </div>
+                <h1 className="text-2xl font-bold text-gray-900 mb-2">Blood Bank Affiliation</h1>
+                <p className="text-gray-500 text-sm mb-8">Please map your administrative account to a registered Blood Bank entity.</p>
+
+                <form onSubmit={submitOnboarding} className="space-y-4">
+                   <div className="text-left">
+                      <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Select Your Registry</label>
+                      <select required value={selectedBloodBank} onChange={(e)=>setSelectedBloodBank(e.target.value)} className="w-full bg-gray-50 border border-gray-200 text-gray-900 rounded-xl px-4 py-3 outline-none focus:border-red-400 focus:ring-1 font-semibold">
+                         {bloodBanksList.length === 0 ? <option value="">Loading registries...</option> : null}
+                         {bloodBanksList.map(b => (
+                            <option key={b.id} value={b.id}>{b.name}</option>
+                         ))}
+                      </select>
+                   </div>
+                   <div className="text-left">
+                      <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2 mt-4">Precise Location Address</label>
+                      <input required type="text" value={addressInput} onChange={(e)=>setAddressInput(e.target.value)} placeholder="e.g. 1st Main Rd, Bangalore" className="w-full bg-gray-50 border border-gray-200 text-gray-900 rounded-xl px-4 py-3 outline-none focus:border-red-400 focus:ring-1 font-semibold"/>
+                   </div>
+                   <button type="submit" disabled={onboardLoading || bloodBanksList.length === 0} className="w-full mt-4 bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-6 rounded-xl transition-colors disabled:opacity-50">
+                      {onboardLoading ? "Locking..." : "Initialize Portals"}
+                   </button>
+                </form>
+            </div>
+         </div>
+      </AuthGuard>
+    )
+  }
+
+  // --- STANDARD RENDER ---
   return (
     <AuthGuard allowedRole="BLOOD_BANK">
       <div className="min-h-screen bg-gray-50 flex flex-col">
@@ -277,8 +374,8 @@ export default function BloodBankDashboard() {
               <p className="text-sm text-gray-500 font-medium mt-1">Operational Dashboard & Inventory Management</p>
             </div>
             <div className="flex items-center gap-4">
-               <div className="h-10 w-10 bg-red-100 text-red-600 rounded-full flex items-center justify-center font-bold border border-red-200">
-                 BB
+               <div className="h-10 px-4 bg-red-100 text-red-700 rounded-lg flex items-center justify-center font-bold border border-red-200 text-sm truncate max-w-xs shadow-sm">
+                 {bloodBanksList.find(b => b.id === bloodBankId)?.name || "Connected Entity"}
                </div>
             </div>
           </div>
@@ -330,7 +427,7 @@ export default function BloodBankDashboard() {
                       <button key={req.id} onClick={() => navigateToRequest(req)} className="w-full text-left p-4 rounded-xl border transition-all bg-white border-gray-200 hover:border-red-300 hover:shadow-sm">
                         <div className="flex justify-between items-start mb-2">
                           <span className="inline-flex items-center justify-center px-2.5 py-1 rounded bg-red-100 text-red-700 font-bold text-sm">
-                            {req.bloodGroup}
+                            {req.bloodGroup.replace("_POS", "+").replace("_NEG", "-")}
                           </span>
                           <span className={`text-xs font-semibold px-2 py-1 rounded ${req.urgency === "CRITICAL" ? "bg-red-600 text-white" : req.urgency === "URGENT" ? "bg-yellow-100 text-yellow-800" : "bg-blue-50 text-blue-600"}`}>
                             {req.urgency}
@@ -391,7 +488,7 @@ export default function BloodBankDashboard() {
                   {requests.map((req) => (
                     <button key={req.id} onClick={() => handleSelectRequest(req)} className={`w-full text-left p-4 rounded-xl border transition-all ${selectedRequest?.id === req.id ? "bg-red-50 border-red-200 shadow-md ring-1 ring-red-200" : "bg-white border-gray-200 hover:border-red-300 hover:shadow-sm"}`}>
                       <div className="flex justify-between items-start mb-2">
-                        <span className="inline-flex items-center justify-center px-2.5 py-1 rounded bg-red-100 text-red-700 font-bold text-sm">{req.bloodGroup}</span>
+                        <span className="inline-flex items-center justify-center px-2.5 py-1 rounded bg-red-100 text-red-700 font-bold text-sm">{req.bloodGroup.replace("_POS", "+").replace("_NEG", "-")}</span>
                         <span className={`text-xs font-semibold px-2 py-1 rounded ${req.urgency === "CRITICAL" ? "bg-red-600 text-white" : req.urgency === "URGENT" ? "bg-yellow-100 text-yellow-800" : "bg-blue-50 text-blue-600"}`}>{req.urgency}</span>
                       </div>
                       <h3 className="font-semibold text-gray-900 truncate">{req.hospitalName}</h3>
@@ -416,12 +513,12 @@ export default function BloodBankDashboard() {
                 <>
                   {/* DETAILS PANEL */}
                   <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-6 relative overflow-hidden">
-                    <div className="absolute top-0 right-0 p-6 pointer-events-none opacity-5"><span className="text-9xl font-black">{selectedRequest.bloodGroup}</span></div>
+                    <div className="absolute top-0 right-0 p-6 pointer-events-none opacity-5"><span className="text-9xl font-black">{selectedRequest.bloodGroup.replace("_POS", "+").replace("_NEG", "-")}</span></div>
                     <div className="flex justify-between items-start mb-6">
                       <div><h2 className="text-2xl font-bold text-gray-900">{selectedRequest.hospitalName}</h2><p className="text-gray-500 mt-1">{selectedRequest.city} • Request {selectedRequest.id.substring(0,6)}</p></div>
                     </div>
                     <div className="grid grid-cols-2 sm:grid-cols-4 gap-6 bg-gray-50 p-4 rounded-xl border border-gray-100">
-                      <div><p className="text-xs text-gray-500 uppercase font-semibold mb-1">Blood Group</p><p className="font-bold text-red-600 text-lg">{selectedRequest.bloodGroup}</p></div>
+                      <div><p className="text-xs text-gray-500 uppercase font-semibold mb-1">Blood Group</p><p className="font-bold text-red-600 text-lg">{selectedRequest.bloodGroup.replace("_POS", "+").replace("_NEG", "-")}</p></div>
                       <div><p className="text-xs text-gray-500 uppercase font-semibold mb-1">Units Req.</p><p className="font-semibold text-gray-900 text-lg">{selectedRequest.unitsRequired}</p></div>
                       <div><p className="text-xs text-gray-500 uppercase font-semibold mb-1">Contact</p><p className="font-medium text-gray-900">{selectedRequest.contactName}</p><p className="text-sm text-gray-500">{selectedRequest.contactNumber}</p></div>
                       <div><p className="text-xs text-gray-500 uppercase font-semibold mb-1">Urgency</p><p className="font-medium text-gray-900">{selectedRequest.urgency}</p></div>
@@ -437,7 +534,7 @@ export default function BloodBankDashboard() {
                         <div className="bg-green-50 border border-green-200 rounded-xl p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-sm">
                           <div>
                             <div className="flex items-center gap-2 text-green-800 font-bold"><svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7"></path></svg>Blood Available in Inventory</div>
-                            <p className="text-green-700/80 text-sm mt-1">We currently stock {unitsAvailable} units of {selectedRequest.bloodGroup}.</p>
+                            <p className="text-green-700/80 text-sm mt-1">We currently stock {unitsAvailable} units of {selectedRequest.bloodGroup.replace("_POS", "+").replace("_NEG", "-")}.</p>
                           </div>
                           <button onClick={handleFulfillRequest} disabled={actionLoading} className="shrink-0 bg-green-600 text-white font-medium py-2.5 px-6 rounded-lg hover:bg-green-700 shadow-md transition-colors">{actionLoading ? "Fulfilling..." : "Fulfill Request"}</button>
                         </div>
@@ -445,7 +542,7 @@ export default function BloodBankDashboard() {
                         <div className="bg-orange-50 border border-orange-200 rounded-xl p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-sm">
                           <div>
                             <div className="flex items-center gap-2 text-orange-800 font-bold"><svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>Insufficient Stock</div>
-                            <p className="text-orange-700/80 text-sm mt-1">Only {unitsAvailable} units of {selectedRequest.bloodGroup} available.</p>
+                            <p className="text-orange-700/80 text-sm mt-1">Only {unitsAvailable} units of {selectedRequest.bloodGroup.replace("_POS", "+").replace("_NEG", "-")} available.</p>
                           </div>
                           <button onClick={handleGenerateDonors} disabled={actionLoading} className="shrink-0 bg-orange-600 text-white font-medium py-2.5 px-6 rounded-lg shadow-md hover:bg-orange-700 transition-colors">{actionLoading ? "Computing ML Priority..." : "Generate Priority Donor List"}</button>
                         </div>
@@ -455,13 +552,13 @@ export default function BloodBankDashboard() {
                   {/* ML DONORS */}
                   {donorList.length > 0 && (
                     <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-6 animate-in slide-in-from-top-4 fade-in duration-500">
-                      <h3 className="text-lg font-bold text-gray-900 mb-4 flex items-center gap-2"><svg className="w-5 h-5 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>Algorithm Priority Donors</h3>
+                      <h3 className="text-lg font-bold text-gray-900 mb-4 flex items-center gap-2"><svg className="w-5 h-5 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>Algorithm Priority Donors</h3>
                       <div className="grid grid-cols-1 gap-4">
                         {donorList.map((donor, idx) => (
                           <div key={donor.donorId} className="flex items-center justify-between p-4 bg-gray-50 rounded-xl border border-gray-100 hover:border-gray-200 transition-colors">
                             <div className="flex items-center gap-4">
                               <div className="text-xl font-bold text-gray-300 w-6 text-right">#{idx + 1}</div>
-                              <div className="h-10 w-10 bg-white shadow-sm border border-gray-100 rounded-full flex items-center justify-center font-bold text-red-600">{donor.bloodGroup}</div>
+                              <div className="h-10 w-10 bg-white shadow-sm border border-gray-100 rounded-full flex items-center justify-center font-bold text-red-600">{donor.bloodGroup.replace("_POS", "+").replace("_NEG", "-")}</div>
                               <div><p className="font-semibold text-gray-900">{donor.name}</p><p className="text-sm text-gray-500">{donor.phoneNumber}</p></div>
                             </div>
                             <div className="flex items-center gap-6">
@@ -583,7 +680,7 @@ export default function BloodBankDashboard() {
 
                   {/* Submission Row */}
                   <div className="md:col-span-2 pt-4 border-t border-gray-100 flex justify-end">
-                    <button type="submit" disabled={driveActionLoading} className="bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-8 rounded-xl transition-colors disabled:opacity-50 flex items-center gap-2">
+                    <button type="submit" disabled={driveActionLoading || !bloodBankId} className="bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-8 rounded-xl transition-colors disabled:opacity-50 flex items-center gap-2">
                        {driveActionLoading ? "Broadcasting..." : "Create Drive Event"}
                     </button>
                   </div>
