@@ -298,7 +298,7 @@ export default function HospitalDashboard() {
                      </div>
 
                      {/* Expander specifically requested via user instructions */}
-                     {req.status !== "FULFILLED" && (
+                     {req.status === "IN_PROGRESS" && (
                        <div className="mt-4">
                          <button 
                            onClick={() => handleToggleDonors(req.id)}

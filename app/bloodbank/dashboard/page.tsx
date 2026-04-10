@@ -76,7 +76,7 @@ export default function BloodBankDashboard() {
   const fetchRequests = async () => {
     setLoadingRequests(true);
     try {
-      const res = await fetch("/api/requests/active?city=Bangalore");
+      const res = await fetch("/api/requests/active");
       const json = await res.json();
       if (json.success) setRequests(json.data);
     } catch (error) {

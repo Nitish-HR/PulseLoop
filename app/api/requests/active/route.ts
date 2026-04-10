@@ -4,18 +4,9 @@ import { NextRequest, NextResponse } from "next/server";
 export async function GET(request: NextRequest) {
   try {
     const city = request.nextUrl.searchParams.get("city");
-
-    if (!city) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: "city is required",
-        },
-        { status: 400 }
-      );
-    }
-
-    const requests = await getActiveRequestsByCity(city);
+    
+    // Pass city as string or undefined
+    const requests = await getActiveRequestsByCity(city || undefined);
 
     return NextResponse.json({
       success: true,

@@ -56,12 +56,12 @@ export async function createRequest(data: CreateRequestInput): Promise<string> {
   return requestRef.id;
 }
 
-export async function getActiveRequests(city: string): Promise<Request[]> {
-  const activeRequestsQuery = query(
-    requestsCollection,
-    where("status", "==", "PENDING"),
-    where("city", "==", city)
-  );
+export async function getActiveRequests(city?: string): Promise<Request[]> {
+  const constraints = [where("status", "==", "PENDING")];
+  if (city) {
+    constraints.push(where("city", "==", city));
+  }
+  const activeRequestsQuery = query(requestsCollection, ...constraints);
   const querySnapshot = await getDocs(activeRequestsQuery);
 
   return querySnapshot.docs.map((requestDoc) => {

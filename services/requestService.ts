@@ -18,6 +18,6 @@ export async function createHospitalRequest(
   return createRequest(data);
 }
 
-export async function getActiveRequestsByCity(city: string) {
+export async function getActiveRequestsByCity(city?: string) {
   return getActiveRequests(city);
 }
