@@ -40,7 +40,7 @@ type Drive = {
 };
 
 export default function DonorDashboard() {
-  const [activeTab, setActiveTab] = useState<"dashboard" | "emergency" | "drives">("dashboard");
+  const [activeTab, setActiveTab] = useState<"dashboard" | "emergency" | "drives" | "community">("dashboard");
 
   // Auth State
   const [authUid, setAuthUid] = useState<string | null>(null);
@@ -51,6 +51,7 @@ export default function DonorDashboard() {
   const [onboardLoading, setOnboardLoading] = useState(false);
   const [onboardError, setOnboardError] = useState("");
   const [onboardForm, setOnboardForm] = useState({
+    name: "",
     city: "",
     phoneNumber: "",
     bloodGroup: "A_POS",
@@ -75,6 +76,17 @@ export default function DonorDashboard() {
   // State: Drives
   const [drivesList, setDrivesList] = useState<Drive[]>([]);
   const [loadingDrives, setLoadingDrives] = useState(true);
+
+  // State: Community
+  const [leaderboard, setLeaderboard] = useState<{donorId:string;name:string;donationCount:number;streakCount:number;bloodGroup:string;city:string}[]>([]);
+  const [loadingLeaderboard, setLoadingLeaderboard] = useState(true);
+  const [badges, setBadges] = useState<{id:string;badgeType:string;label:string;emoji:string;description:string;awardedAt:string}[]>([]);
+  const [loadingBadges, setLoadingBadges] = useState(true);
+  const [stories, setStories] = useState<{id:string;donorId:string;name:string;story:string;createdAt:string}[]>([]);
+  const [loadingStories, setLoadingStories] = useState(true);
+  const [storyText, setStoryText] = useState("");
+  const [submittingStory, setSubmittingStory] = useState(false);
+  const [storySuccess, setStorySuccess] = useState(false);
 
   // --- Auth Initializer ---
   useEffect(() => {
@@ -137,6 +149,58 @@ export default function DonorDashboard() {
     }
   };
 
+  const fetchLeaderboard = async () => {
+    setLoadingLeaderboard(true);
+    try {
+      const res = await fetch("/api/donor/leaderboard");
+      const json = await res.json();
+      if (json.success) setLeaderboard(json.leaderboard);
+    } catch (e) { console.error(e); }
+    finally { setLoadingLeaderboard(false); }
+  };
+
+  const fetchBadges = async (uid: string) => {
+    setLoadingBadges(true);
+    try {
+      const res = await fetch(`/api/donor/badges?donorId=${uid}`);
+      const json = await res.json();
+      if (json.success) setBadges(json.badges);
+    } catch (e) { console.error(e); }
+    finally { setLoadingBadges(false); }
+  };
+
+  const fetchStories = async () => {
+    setLoadingStories(true);
+    try {
+      const res = await fetch("/api/stories/all");
+      const json = await res.json();
+      if (json.success) setStories(json.stories);
+    } catch (e) { console.error(e); }
+    finally { setLoadingStories(false); }
+  };
+
+  const submitStory = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!authUid || !storyText.trim()) return;
+    setSubmittingStory(true);
+    setStorySuccess(false);
+    try {
+      const res = await fetch("/api/stories/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ donorId: authUid, name: authProfile.name, story: storyText }),
+      });
+      const json = await res.json();
+      if (json.success) {
+        setStoryText("");
+        setStorySuccess(true);
+        fetchStories();
+        setTimeout(() => setStorySuccess(false), 3000);
+      }
+    } catch (e) { console.error(e); }
+    finally { setSubmittingStory(false); }
+  };
+
   useEffect(() => {
     if (!authUid) return;
     if (activeTab === "dashboard") {
@@ -145,6 +209,10 @@ export default function DonorDashboard() {
       fetchRequests();
     } else if (activeTab === "drives") {
       fetchDrives();
+    } else if (activeTab === "community") {
+      fetchLeaderboard();
+      fetchBadges(authUid);
+      fetchStories();
     }
   }, [activeTab, authUid]);
 
@@ -159,12 +227,15 @@ export default function DonorDashboard() {
       const res = await fetch("/api/donor/onboard", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ 
-          donorId: authUid, 
-          name: authProfile.name,
-          email: authProfile.email,
-          ...onboardForm 
-        }),
+        body: JSON.stringify((() => {
+          const { name: formName, ...rest } = onboardForm;
+          return {
+            donorId: authUid,
+            name: formName || authProfile.name,
+            email: authProfile.email,
+            ...rest,
+          };
+        })()),
       });
       const json = await res.json();
       
@@ -256,6 +327,10 @@ export default function DonorDashboard() {
                 {onboardError && ( <div className="mb-6 p-4 bg-red-50 text-red-600 rounded-lg text-sm font-bold border border-red-100">{onboardError}</div> )}
                 
                 <form onSubmit={submitOnboarding} className="space-y-4">
+                   <div>
+                      <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Full Name</label>
+                      <input required type="text" value={onboardForm.name} onChange={(e)=>setOnboardForm({...onboardForm, name: e.target.value})} placeholder="e.g. Ravi Kumar" className="w-full bg-gray-50 border border-gray-200 text-gray-900 rounded-xl px-4 py-3 outline-none focus:border-red-400 focus:ring-1 transition-colors"/>
+                   </div>
                    <div className="grid grid-cols-2 gap-4">
                      <div>
                         <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">City</label>
@@ -353,6 +428,12 @@ export default function DonorDashboard() {
               onClick={() => setActiveTab("drives")}
             >
               Drives
+            </button>
+            <button
+              className={`py-3 font-semibold text-sm border-b-2 transition-colors whitespace-nowrap ${activeTab === "community" ? "border-red-600 text-red-600" : "border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300"}`}
+              onClick={() => setActiveTab("community")}
+            >
+              Community
             </button>
           </div>
         </header>
@@ -550,6 +631,124 @@ export default function DonorDashboard() {
                  ))}
                </div>
             )}
+          </div>
+        )}
+
+        {/* TAB 4: COMMUNITY */}
+        {activeTab === "community" && (
+          <div className="flex-1 max-w-5xl mx-auto w-full p-6 md:p-8 space-y-8">
+
+            {/* LEADERBOARD */}
+            <div className="bg-white border border-gray-200 rounded-2xl shadow-sm overflow-hidden">
+              <div className="px-6 py-4 border-b border-gray-100">
+                <h2 className="text-lg font-bold text-gray-900">🏆 Top Donors</h2>
+                <p className="text-sm text-gray-500 mt-0.5">Ranked by lifetime donation count</p>
+              </div>
+              {loadingLeaderboard ? (
+                <div className="p-8 text-center text-gray-400 text-sm">Loading leaderboard...</div>
+              ) : leaderboard.length === 0 ? (
+                <div className="p-8 text-center text-gray-400 text-sm">No donations recorded yet. Be the first!</div>
+              ) : (
+                <div className="divide-y divide-gray-100">
+                  {leaderboard.map((donor, idx) => (
+                    <div key={donor.donorId} className="flex items-center gap-4 px-6 py-4">
+                      <div className={`w-8 h-8 rounded-full flex items-center justify-center font-black text-sm shrink-0 ${
+                        idx === 0 ? "bg-yellow-100 text-yellow-700" :
+                        idx === 1 ? "bg-gray-100 text-gray-600" :
+                        idx === 2 ? "bg-orange-100 text-orange-700" :
+                        "bg-gray-50 text-gray-500"
+                      }`}>{idx + 1}</div>
+                      <div className="flex-1 min-w-0">
+                        <p className="font-semibold text-gray-900 truncate">{donor.name} {donor.donorId === authUid ? <span className="text-xs font-normal text-red-500 ml-1">(You)</span> : null}</p>
+                        <p className="text-xs text-gray-500">{donor.city} · {donor.bloodGroup.replace("_POS","+").replace("_NEG","-")}</p>
+                      </div>
+                      <div className="text-right shrink-0">
+                        <p className="font-bold text-gray-900">{donor.donationCount}</p>
+                        <p className="text-xs text-gray-500">donations</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* BADGES */}
+            <div className="bg-white border border-gray-200 rounded-2xl shadow-sm overflow-hidden">
+              <div className="px-6 py-4 border-b border-gray-100">
+                <h2 className="text-lg font-bold text-gray-900">🎖️ Your Badges</h2>
+                <p className="text-sm text-gray-500 mt-0.5">Earned through your donation milestones</p>
+              </div>
+              {loadingBadges ? (
+                <div className="p-8 text-center text-gray-400 text-sm">Loading badges...</div>
+              ) : badges.length === 0 ? (
+                <div className="p-8 text-center">
+                  <p className="text-gray-500 text-sm font-medium">No badges yet — make your first donation to get started!</p>
+                </div>
+              ) : (
+                <div className="p-6 grid grid-cols-2 sm:grid-cols-3 gap-4">
+                  {badges.map((badge) => (
+                    <div key={badge.id} className="border border-gray-100 rounded-xl p-4 text-center bg-gray-50">
+                      <div className="text-3xl mb-2">{badge.emoji}</div>
+                      <p className="font-bold text-gray-900 text-sm">{badge.label}</p>
+                      <p className="text-xs text-gray-500 mt-1">{badge.description}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* STORIES */}
+            <div className="bg-white border border-gray-200 rounded-2xl shadow-sm overflow-hidden">
+              <div className="px-6 py-4 border-b border-gray-100">
+                <h2 className="text-lg font-bold text-gray-900">💬 Donor Stories</h2>
+                <p className="text-sm text-gray-500 mt-0.5">Share what drives you to donate</p>
+              </div>
+
+              {/* Submit Story */}
+              <div className="p-6 border-b border-gray-100">
+                {storySuccess && (
+                  <div className="mb-4 p-3 bg-green-50 border border-green-200 text-green-700 text-sm font-semibold rounded-lg">Your story has been shared!</div>
+                )}
+                <form onSubmit={submitStory} className="space-y-3">
+                  <textarea
+                    value={storyText}
+                    onChange={(e) => setStoryText(e.target.value)}
+                    placeholder="Tell the community why you donate blood..."
+                    rows={3}
+                    className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 text-sm text-gray-900 outline-none focus:border-red-400 focus:ring-1 resize-none"
+                  />
+                  <div className="flex justify-end">
+                    <button
+                      type="submit"
+                      disabled={submittingStory || storyText.trim().length < 10}
+                      className="bg-red-600 hover:bg-red-700 text-white font-semibold py-2 px-6 rounded-xl text-sm transition-colors disabled:opacity-50"
+                    >
+                      {submittingStory ? "Sharing..." : "Share Story"}
+                    </button>
+                  </div>
+                </form>
+              </div>
+
+              {/* Stories List */}
+              {loadingStories ? (
+                <div className="p-8 text-center text-gray-400 text-sm">Loading stories...</div>
+              ) : stories.length === 0 ? (
+                <div className="p-8 text-center text-gray-400 text-sm">No stories yet. Be the first to share!</div>
+              ) : (
+                <div className="divide-y divide-gray-100">
+                  {stories.map((s) => (
+                    <div key={s.id} className="px-6 py-5">
+                      <div className="flex items-center justify-between mb-2">
+                        <p className="font-semibold text-gray-900 text-sm">{s.name}</p>
+                        <p className="text-xs text-gray-400">{new Date(s.createdAt).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}</p>
+                      </div>
+                      <p className="text-gray-600 text-sm leading-relaxed">{s.story}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
           </div>
         )}
 

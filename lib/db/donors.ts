@@ -9,6 +9,7 @@ import {
   where,
 } from "firebase/firestore";
 import { db } from "@/lib/firebase";
+import { checkAndAwardBadges } from "@/lib/utils/badgeUtils";
 
 export type BloodGroup =
   | "A_POS"
@@ -68,6 +69,17 @@ export async function updateDonorDonation(
     donationCount: increment(1),
     updatedAt: new Date().toISOString(),
   });
+
+  // Fetch fresh counts and award any new badges
+  const freshSnap = await getDoc(donorRef);
+  if (freshSnap.exists()) {
+    const data = freshSnap.data();
+    checkAndAwardBadges(
+      donorId,
+      data.donationCount || 0,
+      data.streakCount || 0
+    ).catch(console.error);
+  }
 }
 
 export async function getEligibleDonors(
